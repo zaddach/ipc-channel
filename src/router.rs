@@ -131,4 +131,4 @@ enum RouterMsg {
     AddRoute(OpaqueIpcReceiver, RouterHandler),
 }
 
-pub type RouterHandler = Box<FnMut(OpaqueIpcMessage) + Send>;
+pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
