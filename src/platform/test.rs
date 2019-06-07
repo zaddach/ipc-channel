@@ -9,6 +9,7 @@
 
 use crate::platform::{self, OsIpcChannel, OsIpcReceiverSet};
 use crate::platform::{OsIpcSharedMemory};
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

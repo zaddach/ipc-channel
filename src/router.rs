@@ -7,6 +7,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::thread;

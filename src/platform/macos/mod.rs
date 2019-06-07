@@ -13,6 +13,7 @@ use self::mach_sys::{mach_msg_timeout_t, mach_port_limits_t, mach_port_msgcount_
 use self::mach_sys::{mach_port_right_t, mach_port_t, mach_task_self_, vm_inherit_t};
 
 use bincode;
+use lazy_static::lazy_static;
 use libc::{self, c_char, c_uint, c_void, size_t};
 use rand::{self, Rng};
 use std::cell::Cell;

@@ -9,6 +9,7 @@
 
 use bincode;
 use crossbeam_channel::{self, Receiver, Select, Sender, TryRecvError};
+use lazy_static::lazy_static;
 use std::sync::{Arc, Mutex};
 use std::collections::hash_map::HashMap;
 use std::cell::{RefCell, Ref};

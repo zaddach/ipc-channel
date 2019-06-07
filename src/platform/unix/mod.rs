@@ -9,10 +9,13 @@
 
 use bincode;
 use fnv::FnvHasher;
+use lazy_static::lazy_static;
 use libc::{self, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_void, getsockopt};
 use libc::{iovec, mode_t, msghdr, off_t, recvmsg, sendmsg};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t, sa_family_t};
+#[cfg(all(feature="memfd", target_os="linux"))]
+use sc::syscall;
 use std::cell::Cell;
 use std::cmp;
 use std::collections::HashMap;
