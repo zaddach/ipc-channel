@@ -22,12 +22,14 @@ rand = "0.6"
 serde = { version="1.0", features=["rc"] }
 uuid = {version = "0.7", features = ["v4"]}
 fnv = "1.0.3"
-tempfile = "3"
 futures-preview = { version = "0.3.0-alpha", optional = true }
 futures-test-preview = { version = "0.3.0-alpha", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "openbsd", target_os = "freebsd"))'.dependencies]
 mio = "0.6.11"
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 sc = { version = "0.2.2", optional = true }
 
 [dev-dependencies]
