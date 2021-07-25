@@ -76,6 +76,12 @@ impl FromRawHandle for WinHandle {
     }
 }
 
+impl From<crate::descriptor::OwnedDescriptor> for WinHandle {
+    fn from(descriptor: crate::descriptor::OwnedDescriptor) -> WinHandle {
+        WinHandle::new(descriptor.into_raw_handle())
+    }
+}
+
 impl Into<File> for WinHandle {
     fn into(self) -> File {
         unsafe {

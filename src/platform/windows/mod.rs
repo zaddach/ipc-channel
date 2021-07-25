@@ -24,6 +24,7 @@ use std::io;
 use std::marker::{Send, Sync, PhantomData};
 use std::mem;
 use std::ops::{Deref, DerefMut, RangeFrom};
+use std::os::windows::io::IntoRawHandle;
 use std::ptr;
 use std::ptr::null_mut;
 use std::slice;
@@ -38,10 +39,10 @@ use winapi::um::synchapi::CreateEventA;
 
 
 mod aliased_cell;
-pub mod handle;
+mod handle;
 use self::aliased_cell::AliasedCell;
-use crate::platform::Descriptor;
-use self::handle::{WinHandle, dup_handle, dup_handle_to_process, move_handle_to_process};
+use crate::descriptor::OwnedDescriptor;
+use crate::platform::windows::handle::{WinHandle, dup_handle, dup_handle_to_process, move_handle_to_process};
 
 lazy_static! {
     static ref CURRENT_PROCESS_ID: winapi::shared::ntdef::ULONG = unsafe { winapi::um::processthreadsapi::GetCurrentProcessId() };
@@ -745,7 +746,7 @@ impl MessageReader {
         }
     }
 
-    fn get_message(&mut self) -> Result<Option<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>)>,
+    fn get_message(&mut self) -> Result<Option<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>)>,
                                         WinError> {
         // Never touch the buffer while it's still mutably aliased by the kernel!
         if self.r#async.is_some() {
@@ -758,7 +759,7 @@ impl MessageReader {
             let mut channels: Vec<OsOpaqueIpcChannel> = vec![];
             let mut shmems: Vec<OsIpcSharedMemory> = vec![];
             let mut big_data = None;
-            let mut descriptors: Vec<Descriptor> = vec![];
+            let mut descriptors: Vec<OwnedDescriptor> = vec![];
 
             if let Some(oob) = message.oob_data() {
                 win32_trace!("[$ {:?}] msg with total {} bytes, {} channels, {} shmems, big data handle {:?}",
@@ -776,7 +777,7 @@ impl MessageReader {
                 }
 
                 for handle in oob.descriptor_handles {
-                    descriptors.push(WinHandle::new(handle as HANDLE));
+                    descriptors.push(OwnedDescriptor::new(handle as HANDLE));
                 }
 
                 if oob.big_data_receiver_handle.is_some() {
@@ -1001,7 +1002,7 @@ impl OsIpcReceiver {
     // the implementation in select() is used.  It does much the same thing, but across multiple
     // channels.
     fn receive_message(&self, mut blocking_mode: BlockingMode)
-                       -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>),WinError> {
+                       -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),WinError> {
         let mut reader = self.reader.borrow_mut();
         assert!(reader.entry_id.is_none(), "receive_message is only valid before this OsIpcReceiver was added to a Set");
         // This function loops, because in the case of a blocking read, we may need to
@@ -1031,18 +1032,18 @@ impl OsIpcReceiver {
     }
 
     pub fn recv(&self)
-                -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>),WinError> {
+                -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),WinError> {
         win32_trace!("recv");
         self.receive_message(BlockingMode::Blocking)
     }
 
     pub fn try_recv(&self)
-                    -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>),WinError> {
+                    -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),WinError> {
         win32_trace!("try_recv");
         self.receive_message(BlockingMode::Nonblocking)
     }
 
-    pub fn try_recv_timeout(&self, duration: Duration) -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>),WinError> {
+    pub fn try_recv_timeout(&self, duration: Duration) -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),WinError> {
         win32_trace!("try_recv_timeout");
         self.receive_message(BlockingMode::Timeout(duration))
     }
@@ -1217,7 +1218,7 @@ impl OsIpcSender {
                 data: &[u8],
                 ports: Vec<OsIpcChannel>,
                 shared_memory_regions: Vec<OsIpcSharedMemory>,
-                descriptors: Vec<Descriptor>)
+                descriptors: Vec<OwnedDescriptor>)
                 -> Result<(),WinError>
     {
         // We limit the max size we can send here; we can fix this
@@ -1258,7 +1259,7 @@ impl OsIpcSender {
         }
 
         for descriptor in descriptors {
-            let mut raw_remote_handle = move_handle_to_process(descriptor, &server_h)?;
+            let mut raw_remote_handle = move_handle_to_process(descriptor.into(), &server_h)?;
             oob.descriptor_handles.push(raw_remote_handle.take_raw() as intptr_t);
         }
 
@@ -1328,7 +1329,7 @@ impl OsIpcSender {
 }
 
 pub enum OsIpcSelectionResult {
-    DataReceived(u64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>),
+    DataReceived(u64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),
     ChannelClosed(u64),
 }
 
@@ -1550,7 +1551,7 @@ impl OsIpcReceiverSet {
 }
 
 impl OsIpcSelectionResult {
-    pub fn unwrap(self) -> (u64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<Descriptor>) {
+    pub fn unwrap(self) -> (u64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>) {
         match self {
             OsIpcSelectionResult::DataReceived(id, data, channels, shared_memory_regions, descriptors) => {
                 (id, data, channels, shared_memory_regions, descriptors)
@@ -1691,7 +1692,7 @@ impl OsIpcOneShotServer {
                                    Vec<u8>,
                                    Vec<OsOpaqueIpcChannel>,
                                    Vec<OsIpcSharedMemory>,
-                                   Vec<Descriptor>),WinError> {
+                                   Vec<OwnedDescriptor>),WinError> {
         let receiver = self.receiver;
         receiver.accept()?;
         let (data, channels, shmems, descriptors) = receiver.recv()?;
