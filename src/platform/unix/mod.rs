@@ -153,7 +153,7 @@ impl OsIpcReceiver {
     }
 
     pub fn try_recv_timeout(&self, duration: Duration)
-                    -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),UnixError> {
+                    -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>, Vec<OwnedDescriptor>),UnixError> {
         recv(self.fd.get(), BlockingMode::Timeout(duration))
     }
 }
