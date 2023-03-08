@@ -29,7 +29,7 @@ use std::slice;
 use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
-use winapi::um::winnt::{HANDLE};
+use winapi::um::winnt::HANDLE;
 use winapi::um::handleapi::{INVALID_HANDLE_VALUE};
 use winapi::shared::minwindef::{TRUE, FALSE, LPVOID};
 use winapi;
@@ -39,6 +39,7 @@ use winapi::um::synchapi::CreateEventA;
 mod aliased_cell;
 mod handle;
 use self::aliased_cell::AliasedCell;
+use self::handle::move_handle_from_process;
 use crate::descriptor::OwnedDescriptor;
 use crate::platform::windows::handle::{WinHandle, dup_handle, dup_handle_to_process, move_handle_to_process};
 
@@ -160,15 +161,50 @@ impl<'data> Message<'data> {
     fn oob_data(&self) -> Option<OutOfBandMessage> {
         if self.oob_len > 0 {
 
-            let oob = bincode::deserialize::<OutOfBandMessage>(self.oob_bytes())
+            let mut oob = bincode::deserialize::<OutOfBandMessage>(self.oob_bytes())
                 .expect("Failed to deserialize OOB data");
-            if oob.target_process_id != *CURRENT_PROCESS_ID {
+
+            if oob.handles_mapped && oob.target_process_id != *CURRENT_PROCESS_ID {
                 panic!("Windows IPC channel received handles intended for pid {}, but this is pid {}. \
-                       This likely happened because a receiver was transferred while it had outstanding data \
-                       that contained a channel or shared memory in its pipe. \
-                       This isn't supported in the Windows implementation.",
-                       oob.target_process_id, *CURRENT_PROCESS_ID);
+                    This likely happened because a receiver was transferred while it had outstanding data \
+                    that contained a channel or shared memory in its pipe. \
+                    This isn't supported in the Windows implementation.",
+                    oob.target_process_id, *CURRENT_PROCESS_ID);
             }
+            
+            if !oob.handles_mapped {
+                unsafe {
+                    let raw_handle = winapi::um::processthreadsapi::OpenProcess(winapi::um::winnt::PROCESS_DUP_HANDLE,
+                        FALSE,
+                        oob.source_process_id as winapi::shared::minwindef::DWORD);
+                    if raw_handle.is_null() {
+                        panic!("Failed to open process id {} for mapping handles", oob.source_process_id);
+                    }
+                    let other_process = WinHandle::new(raw_handle);
+
+                    for handle in oob.channel_handles.iter_mut() {
+                        match move_handle_from_process(*handle as *mut winapi::ctypes::c_void, & other_process) {
+                            Ok(mapped_handle) => *handle = mapped_handle.into(),
+                            Err(err) => panic!("Failed to map handle from process {} to our process {}: {}", oob.source_process_id, *CURRENT_PROCESS_ID, err),
+                        }
+                    }
+
+                    for handle_size in oob.shmem_handles.iter_mut() {
+                        match move_handle_from_process(handle_size.0  as *mut winapi::ctypes::c_void, & other_process) {
+                            Ok(mapped_handle) => *handle_size = (mapped_handle.into(), handle_size.1),
+                            Err(err) => panic!("Failed to map handle from process {} to our process {}: {}", oob.source_process_id, *CURRENT_PROCESS_ID, err),
+                        }
+                    }
+
+                    for handle in oob.descriptor_handles.iter_mut() {
+                        match move_handle_from_process(*handle  as *mut winapi::ctypes::c_void, & other_process) {
+                            Ok(mapped_handle) => *handle = mapped_handle.into(),
+                            Err(err) => panic!("Failed to map handle from process {} to our process {}: {}", oob.source_process_id, *CURRENT_PROCESS_ID, err),
+                        }
+                    }
+                }  
+            }
+
             Some(oob)
         } else {
             None
@@ -202,21 +238,25 @@ impl<'data> Message<'data> {
 /// and then everything dies -- we don't want those resources to be leaked).
 #[derive(Debug)]
 struct OutOfBandMessage {
+    source_process_id: u32,
     target_process_id: u32,
     channel_handles: Vec<intptr_t>,
     shmem_handles: Vec<(intptr_t, u64)>, // handle and size
     big_data_receiver_handle: Option<(intptr_t, u64)>, // handle and size
     descriptor_handles: Vec<intptr_t>,
+    handles_mapped: bool,
 }
 
 impl OutOfBandMessage {
-    fn new(target_id: u32) -> OutOfBandMessage {
+    fn new(target_id: u32, handles_mapped: bool) -> OutOfBandMessage {
         OutOfBandMessage {
+            source_process_id: *CURRENT_PROCESS_ID,
             target_process_id: target_id,
             channel_handles: vec![],
             shmem_handles: vec![],
             big_data_receiver_handle: None,
             descriptor_handles: vec![],
+            handles_mapped,
         }
     }
 
@@ -232,11 +272,13 @@ impl serde::Serialize for OutOfBandMessage {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        ((self.target_process_id,
+        ((self.source_process_id,
+          self.target_process_id,
           &self.channel_handles,
           &self.shmem_handles,
           &self.big_data_receiver_handle,
-          &self.descriptor_handles)).serialize(serializer)
+          &self.descriptor_handles,
+          self.handles_mapped)).serialize(serializer)
     }
 }
 
@@ -244,14 +286,16 @@ impl<'de> serde::Deserialize<'de> for OutOfBandMessage {
     fn deserialize<D>(deserializer: D) -> Result<OutOfBandMessage, D::Error>
         where D: serde::Deserializer<'de>
     {
-        let (target_process_id, channel_handles, shmem_handles, big_data_receiver_handle, descriptor_handles) =
+        let (source_process_id, target_process_id, channel_handles, shmem_handles, big_data_receiver_handle, descriptor_handles, handles_mapped) =
             serde::Deserialize::deserialize(deserializer)?;
         Ok(OutOfBandMessage {
+            source_process_id,
             target_process_id: target_process_id,
             channel_handles: channel_handles,
             shmem_handles: shmem_handles,
             big_data_receiver_handle: big_data_receiver_handle,
-            descriptor_handles
+            descriptor_handles,
+            handles_mapped,
         })
     }
 }
@@ -1230,7 +1274,7 @@ impl OsIpcSender {
             (WinHandle::invalid(), 0)
         };
 
-        let mut oob = OutOfBandMessage::new(server_pid);
+        let mut oob = OutOfBandMessage::new(server_pid, server_h.is_valid());
 
         for ref shmem in shared_memory_regions {
             // shmem.handle, shmem.length

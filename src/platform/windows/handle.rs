@@ -12,6 +12,7 @@ use std::ffi::CString;
 use std::default::Default;
 use std::cell::{RefCell};
 
+use winapi::um::handleapi::DuplicateHandle;
 use winapi::um::winnt::{HANDLE};
 use winapi::um::handleapi::{INVALID_HANDLE_VALUE};
 
@@ -153,6 +154,20 @@ impl WinHandle {
     }
 }
 
+impl From<isize> for WinHandle {
+    fn from(value: isize) -> Self {
+        WinHandle::new(value as *mut winapi::ctypes::c_void)
+    }
+}
+
+impl From<WinHandle> for isize {
+    fn from(value: WinHandle) -> Self {
+        let raw_handle = value.as_raw() as isize;
+        mem::forget(value);
+        raw_handle
+    }
+}
+
 /// Duplicate a given handle from this process to the target one, passing the
 /// given flags to DuplicateHandle.
 ///
@@ -196,4 +211,16 @@ pub fn move_handle_to_process(handle: WinHandle, other_process: &WinHandle) -> R
     // so we probably shouldn't try to close it explicitly?
     mem::forget(handle);
     result
+}
+
+pub fn move_handle_from_process(handle: *mut winapi::ctypes::c_void, other_process: &WinHandle) -> Result<WinHandle, WinError> {
+    unsafe {
+        let mut target_handle = INVALID_HANDLE_VALUE;
+        let ok = DuplicateHandle(other_process.as_raw(), handle, CURRENT_PROCESS_HANDLE.as_raw(), &mut target_handle, 0, winapi::shared::minwindef::FALSE, winapi::um::winnt::DUPLICATE_CLOSE_SOURCE | winapi::um::winnt::DUPLICATE_SAME_ACCESS);
+        if ok == winapi::shared::minwindef::FALSE {
+            Err(WinError::last("DuplicateHandle"))
+        } else {
+            Ok(WinHandle::new(target_handle))
+        }
+    }
 }
